@@ -8,9 +8,11 @@
 #include <fcntl.h>
 
 
-void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputFile, char *outputFile){  
+void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputFile, char *outputFile, int forBack, int *curStatus){  
     int childStatus;
+    
     pid_t spawnPid = fork();
+    
 
     switch(spawnPid){
         case -1:
@@ -20,6 +22,10 @@ void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputF
             
             break;
         case 0:;
+            int childPid = getpid();
+            if(forBack == 1) {
+                printf("Background pid is %d\n", childPid);
+            }
             if(isInputFile > 0){
                 int source;
                 source = open(inputFile, O_RDONLY);
@@ -41,39 +47,53 @@ void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputF
                     perror("source open()"); 
                     exit(1); 
                 }
-                int result = dup2(source, 0);
+                int result = dup2(source, 1);
                 if (result == -1) { 
                     perror("source dup2()"); 
                     exit(2); 
                 }
                 close(source);
             }
+            
             execvp(newargv[0], newargv);
             perror("execvp");
             exit(2);
             break;
         default:
-            spawnPid = waitpid(spawnPid, &childStatus, 0);
+            if(forBack == 1){
+                spawnPid = waitpid(spawnPid, &childStatus, WNOHANG);
+            }
+            else {spawnPid = waitpid(spawnPid, &childStatus, 0);
+            
+                if(childStatus != 0){
+                    *curStatus = 1;
+                }
+                else *curStatus = 0;
+            }
             break;
     }
-        
     
 }
 
 
 int main(void){
     int alive = 1;
-    
+    int curStatus = 0;
     while(alive){
-        // Start Smallsh and promt user for input
-        char input[2048];
-        printf(": ");
-        fgets(input, 2048, stdin);
-
+        
         // Checks for input and output files as well as chars to store them
         int isInputFile = 0;
         int isOutputFile = 0;
         int isBackground = 0;
+
+        // Start Smallsh and promt user for input
+        
+        char input[2048];
+        
+            printf(": ");
+        fgets(input, 2048, stdin);
+
+        
 
         char *inputFile;
         char *outputFile;
@@ -178,16 +198,16 @@ int main(void){
                 }
             }
             else if(strncmp(command, "status", 6) == 0 && command != NULL){
-                
+                printf("exit value %d\n", curStatus);
             }
             else{
                 if(poscnt > 0){
                     char *newargv[] = {command, *arguments, NULL };
-                    newProcess(newargv, isInputFile, inputFile, isOutputFile, outputFile);
+                    newProcess(newargv, isInputFile, inputFile, isOutputFile, outputFile, isBackground, &curStatus);
                 }
                 else{ 
                     char *newargv[] = {command, NULL };
-                    newProcess(newargv, isInputFile, inputFile, isOutputFile, outputFile);
+                    newProcess(newargv, isInputFile, inputFile, isOutputFile, outputFile, isBackground, &curStatus);
                 }
             }
 
