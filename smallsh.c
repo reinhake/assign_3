@@ -8,62 +8,84 @@
 #include <fcntl.h>
 #include <signal.h>
 
+volatile sig_atomic_t gStatus = 0;
 volatile sig_atomic_t gSignalStatus = 0;
 volatile sig_atomic_t gBackgroundStatus = 0;
+volatile sig_atomic_t gIsChild = 0;
+volatile sig_atomic_t gPidCount = 0;
 
-
-void handle_SIGINT(int signo){
-    char *mesg = "terminated by signal %d\n";
-    char msg[23];
-    sprintf(msg, mesg, signo); 
-    write(STDOUT_FILENO, msg, 23);
-    gSignalStatus = signo;
+// function to print the status with two different options
+// the first is if the last foreground process was terminated
+// the second is if it was exited normally
+void printStatus(){
+    if(gSignalStatus > 0 && gIsChild == 1){
+        gIsChild = 0;
+        char *mesg = "terminated by signal %d\n";
+        char msg[25];
+        snprintf(msg, 25, mesg, gSignalStatus); 
+        write(STDOUT_FILENO, msg, 25);
+    }
+    else if (gSignalStatus == 0 && gIsChild == 1){ 
+        gIsChild = 0;
+        char *mesg = "exit value %d\n";
+        char msg[15];
+        snprintf(msg, 15, mesg, gStatus); 
+        write(STDOUT_FILENO, msg, 15);
+    }
 }
 
+// handler function for SIGINT that calls printStatus and tells
+// it that the last function was terminated by it
+void handle_SIGINT(int signo){
+    gSignalStatus = signo;
+    printStatus();
+}
+
+// Handler function SIGTSTP that changes whether or not background
+// processes are allowed
+// does so by changing a global variable
 void handle_SIGTSTP(int signo){
     if (gBackgroundStatus == 0){
         gBackgroundStatus = 1;
-        char *mesg = "\nEntering foreground-only mode (& is now ignored)\n";
-        write(STDOUT_FILENO, mesg, 50);
+        char *mesg = "Entering foreground-only mode (& is now ignored)\n";
+        write(STDOUT_FILENO, mesg, 49);
     }
     else {
-        char* mesg = "\nExiting foreground-only mode\n";
+        char* mesg = "Exiting foreground-only mode\n";
         gBackgroundStatus = 0;
-        write(STDOUT_FILENO, mesg, 30);
+        write(STDOUT_FILENO, mesg, 29);
     }
 }
 
-void handle_SIGCHLD(int signo, siginfo_t *info, void *ucontext){
-    char *mesg = "\nbackground pid %d is done\n";
-    char msg[50];
-    pid_t chldPid = signo->si_pid;
-    sprintf(msg, mesg, chldPid); 
-    write(STDOUT_FILENO, msg, 50);
-}
-
-
-
-void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputFile, char *outputFile, int forBack, int *curStatus){  
-    
-    
+// function for any processes that are not built in
+// its parameters are the list of arguments, InputFiles (if any), OutputFiles (if any),
+// the checker for background processes, and finally the array of background processes
+void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputFile, char *outputFile, int forBack, int* pidArray){  
+    // Create a forked child process
     int childStatus;
     pid_t spawnPid = fork();
+    // update global variables so calls and signals function properly
     gSignalStatus = 0;
+    gIsChild = 1;
     
+    // Enter Child process
     switch(spawnPid){
         case -1:
+            //catch error in the forking process
             perror("fork()\n");
             exit(1);
             break;
         case 0:;
-            
+            // Check and open the input files
             if(isInputFile > 0){
                 int source;
+                // open scource file
                 source = open(inputFile, O_RDONLY);
                 if (source == -1) { 
-                    perror("source open()"); 
+                    printf("cannot open %s for input\n", inputFile); 
                     exit(1); 
                 }
+                // duplicate source file to STDIN
                 int result = dup2(source, 0);
                 if (result == -1) { 
                     perror("source dup2()"); 
@@ -71,13 +93,16 @@ void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputF
                 }
                 close(source);
             }
+            // Check and open the output files
             if(isOutputFile > 0){
                 int source;
+                // open scource file
                 source = open(outputFile, O_WRONLY | O_CREAT | O_TRUNC, 0640);
                 if (source == -1) { 
-                    perror("source open()"); 
+                    perror("source open()");
                     exit(1); 
                 }
+                // duplicate source file to STDOUT
                 int result = dup2(source, 1);
                 if (result == -1) { 
                     perror("source dup2()"); 
@@ -85,22 +110,31 @@ void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputF
                 }
                 close(source);
             }
+            //call exec() and run the command while catching any errors
             execvp(newargv[0], newargv);
-            perror("execvp");
+            perror(newargv[0]);
             exit(2);
             break;
         default:
-            if(forBack == 1){
-                printf("Background pid is %d\n", spawnPid);
+            //verify if this process is to be foreground or background
+            if(forBack == 1){// is background
+                // print pid of background process and store it in array
+                // so that it can be checked until it finishes or is terminated
+                printf("background pid is %d\n", spawnPid);
+                pidArray[gPidCount] = spawnPid;
+                gPidCount++;
                 spawnPid = waitpid(spawnPid, &childStatus, WNOHANG);
             }
-            else {
+            else {// is foreground
+                // wait for process to finish running then update the global status
                 spawnPid = waitpid(spawnPid, &childStatus, 0);
                 if(childStatus != 0){
-                    *curStatus = 1;
+                    gStatus = 1;
+                    gIsChild = 0;
                 }
-                else{
-                    *curStatus = 0;
+                else if (childStatus == 0){
+                    gStatus = 0;
+                    gIsChild = 0;
                 }
             }
             break;
@@ -108,19 +142,20 @@ void newProcess(char *newargv[], int isInputFile, char *inputFile, int isOutputF
     
 }
 
-/*
-* First built-in command to change directories
-* if no argument is given, directory is changed to HOME env directory
-* otherwise, directory is changed to the argument given
-*/
+
+// First built-in command to change directories
+// if no argument is given, directory is changed to HOME env directory
+// otherwise, directory is changed to the argument given
+
 void cdCommand(char** arguments, int poscnt){
     char *curdir1 = getenv("HOME");
+    //check if there are any arguments for cd
     if(poscnt > 0){
-        if(arguments[0][0] == '/'){
+        if(arguments[0][0] == '/'){// process absolute positions
             char* aPath = arguments[0];
             chdir(aPath);
         }
-        else{
+        else{// process relative
             char pPath[500]; 
             getcwd(pPath, 500);
             strcat(pPath, "/");
@@ -129,44 +164,65 @@ void cdCommand(char** arguments, int poscnt){
         }
 
     }
-    else {
+    else {// no arguments so cd redirects to HOME enviroment designated directory
         chdir(curdir1);
     }
 }
 
 
 int main(void){
+    // start and exit variable for the while loop
     int alive = 1;
-    int curStatus = 0;
+
+    // stores background pid's
+    int pidArray[20];
+
+    // handler for SIGINT that will call my handler function
+    // whenever CNTR+C is called
     struct sigaction SIGINT_action = {0};
     SIGINT_action.sa_handler = handle_SIGINT;
     sigfillset(&SIGINT_action.sa_mask);
-    SIGINT_action.sa_flags = 0;
+    SIGINT_action.sa_flags = SA_RESTART;
     sigaction(SIGINT, &SIGINT_action, NULL);
 
+    // handler for SIGTSTP that will call my handler function
+    // whenever CNTR+C is called
     struct sigaction SIGTSTP_action = {0};
     SIGTSTP_action.sa_handler = handle_SIGTSTP;
     sigfillset(&SIGTSTP_action.sa_mask);
-    SIGTSTP_action.sa_flags = 0;
+    SIGTSTP_action.sa_flags = SA_RESTART;
     sigaction(SIGTSTP, &SIGTSTP_action, NULL);
 
-    struct sigaction SIGCHLD_action = {0};
-    SIGCHLD_action.sa_handler = handle_SIGCHLD;
-    sigfillset(&SIGCHLD_action.sa_mask);
-    SIGCHLD_action.sa_flags = SA_SIGINFO;
-    sigaction(SIGCHLD, &SIGCHLD_action, NULL);
-
+    // main loop that keeps the program running
+    // starts by checking background processes for any that have been finished
+    // then promts the user and processes their inputs
+    // any built-in function are run in the main process
+    // anything else is funned into a child process and uses exec to call
     while(alive){
-        fflush(stdout);
+        // loops through any background processes that have been called
+        // to search for any that have been terminated or finished running
+        // waitpid is used to check if the process was been terminated by a signal or not
+        int finishedChild = 0;
+        for(int i = 0; i < gPidCount; i++){
+            int Child;
+            int checkChild = waitpid(pidArray[i], &Child, WNOHANG);
+            if(checkChild != 0){
+                printf("background pid %d has exited", pidArray[i]);
+                if(WIFSIGNALED(Child)){
+                    int sig = WTERMSIG(Child);
+                    printf(": terminated by %d", sig);
+                }
+                else printf(": exit status 0");
+                finishedChild++;
+                printf("\n");
+            }
+        }
+        gPidCount = gPidCount - finishedChild;
 
         // Start Smallsh and promt user for input
         char input[2048];
         printf(": ");
         fgets(input, 2048, stdin);
-
-        
-        
-
 
         // Checks for input and output files as well as chars to store them
         int isInputFile = 0;
@@ -184,8 +240,12 @@ int main(void){
         char *command;
         char *token;
         
+        // Makes sure the command line is not empty before turning arguments into
+        // tokens and then storing them
         if(strlen(input) > 1){
+            // remove the new line operator
             errorFix = strtok_r(input, "\n", &saveptr);
+            // Turn the first argument into a token and store it in command
             token = strtok_r(errorFix, " ", &saveptr);
             command = calloc(strlen(token) + 1, sizeof(char));
             strcpy(command, token);
@@ -236,13 +296,16 @@ int main(void){
                             }
                         }
                     }
-                    char proxy[512];
-                    sprintf(proxy, token, getpid());
-                    arguments[poscnt] = calloc(strlen(proxy) + 1, sizeof(char));
-                    strcpy(arguments[poscnt], proxy);
-                    poscnt++;
+                    // adds the pid to %d if there was a $$
+                    if(strncmp(token, "&", 1) != 0){
+                        char proxy[512];
+                        sprintf(proxy, token, getpid());
+                        arguments[poscnt] = calloc(strlen(proxy) + 1, sizeof(char));
+                        strcpy(arguments[poscnt], proxy);
+                        poscnt++;
+                    }
                 }
-              
+                // get the next token and continue looping
                 token = strtok_r(NULL, " ", &saveptr);
             }
           
@@ -260,25 +323,22 @@ int main(void){
             else if(strncmp(command, "status", 6) == 0 && command != NULL){
                 // variable curStatus is changed as foregrond processes are ran
                 // status call returns said status
-                if(gSignalStatus > 0){
-                    printf("terminated by signal %d\n", gSignalStatus);
-                }
-                else printf("exit value %d\n", curStatus);
+                gIsChild = 1;
+                printStatus();
             }
             else{
-                
-                // exec() call when there are arguments
+
+                // any commands that don't fit into the build in command (cd, status, etc.)
+                // will be turned into an argument array so they can be called on by exec()
                 int posTracker = 1;
                 char *newargv[poscnt + 2];
                 newargv[0] = command;
-
                 for(int i = 0; i < poscnt; i++){
                     newargv[posTracker] = arguments[i];
                     posTracker++;
                 }
-
                 newargv[posTracker] = NULL;
-                newProcess(newargv, isInputFile, inputFile, isOutputFile, outputFile, isBackground, &curStatus);
+                newProcess(newargv, isInputFile, inputFile, isOutputFile, outputFile, isBackground, pidArray);
             }
 
             //frees thre memory from the past arguments and commands
@@ -296,5 +356,4 @@ int main(void){
             }
         }
     }
-
 }
